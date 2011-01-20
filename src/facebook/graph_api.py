@@ -199,7 +199,6 @@ class GraphAPI(object):
         """
         return graph_api_request(method, path, args=args, data=data, access_token=self.access_token)
 
-
     # Common GraphAPI operations
     def put_wall_post(self, message, attachment={}, profile_id="me"):
         """Writes a wall post to the given profile's wall.
@@ -227,90 +226,6 @@ class GraphAPI(object):
         """Likes the given post."""
         return self.put(object_id, "likes")
 
-
-class TestUser(object):
-    """Class for creating an manipulating test users"""
-    _graph_api_cls = GraphAPI
-    
-    def __init__(self, user_data):
-        self.user_data = user_data
-        self._graph_api = None
-
-    @property
-    def id(self):
-        return self.user_data['id']
-
-    @property
-    def graph_api(self):
-        if not self._graph_api:
-            if not self.user_data['access_token']:
-                raise Error("User does not have current application installed, no access_token")
-
-            self._graph_api = self._graph_api_cls(self.user_data['access_token'])
-        return self._graph_api
-
-    @property
-    def profile(self):
-        return self.graph_api.fetch("me")
-
-    def build_signed_request(self, user_id, app_secret):
-        return build_signed_request(user_id, self.user_data['access_token'], app_secret)
-
-    def friend_user(self, other_user):
-        """Associate the two TestUser's as friends"""
-        other_user.graph_api.put(other_user.id, "friends/%s" % self.id)
-        self.graph_api.put(self.id, "friends/%s" % other_user.id)
-
-    def __repr__(self):
-        return "<TestUser: %r>" % self.user_data
-
-    @classmethod
-    def create(cls, graph_api, app_id, installed=False, permissions=None):
-        args = {}
-
-        if permissions:
-            args['permissions'] = ",".join(permissions)
-
-        args['installed'] = installed
-
-        user = TestUser(graph_api.put(app_id, "accounts/test-users", **args))
-        user._graph_api_cls = graph_api.__class__
-        return user
-
-    @classmethod
-    def list_all(cls, graph_api, app_id):
-        response = graph_api.fetch_connections(app_id, "accounts/test-users")
-        return [TestUser(user_data) for user_data in response['data']]
-
-    @classmethod
-    def delete_all(cls, graph_api, app_id):
-        """Remote all test users"""
-        for user in cls.list_all(graph_api, app_id):
-            graph_api.delete(user.id)
-
-
-def get_oauth_access_token(app_id, app_secret):
-    """Authenticates as an application and retrieves the OAuth access token"""
-    headers = {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/plain',
-    }
-
-    data = {"grant_type": "client_credentials", "client_id": app_id, "client_secret": app_secret}
-    
-    conn = httplib.HTTPSConnection(GRAPH_API_HOST)
-    
-    conn.request("POST", "/oauth/access_token", urllib.urlencode(data), headers=headers)
-    response = conn.getresponse()
-
-    if response.status != httplib.OK:
-        raise CommunicationError((response.status, response.reason))
-
-    access_token = response.read()
-    if not access_token:
-        raise AuthenticationError("Unknown response")
-
-    return access_token.split("=")[1]
 
 def graph_api_request(method, path, args=None, data=None, access_token=None, headers=None):
     out_headers = {
@@ -364,76 +279,3 @@ def graph_api_request(method, path, args=None, data=None, access_token=None, hea
         raise GraphAPIError("No response")
 
     return response_data
-
-
-def get_user_from_cookie(cookies, app_id, app_secret):
-    """Parses the cookie set by the official Facebook JavaScript SDK.
-
-    cookies should be a dictionary-like object mapping cookie names to
-    cookie values.
-
-    If the user is logged in via Facebook, we return a dictionary with the
-    keys "uid" and "access_token". The former is the user's Facebook ID,
-    and the latter can be used to make authenticated requests to the Graph API.
-    If the user is not logged in, we return None.
-
-    Download the official Facebook JavaScript SDK at
-    http://github.com/facebook/connect-js/. Read more about Facebook
-    authentication at http://developers.facebook.com/docs/authentication/.
-    """
-    cookie = cookies.get("fbs_" + app_id, "")
-    if not cookie: return None
-    args = dict((k, v[-1]) for k, v in cgi.parse_qs(cookie.strip('"')).items())
-    payload = "".join(k + "=" + args[k] for k in sorted(args.keys())
-                      if k != "sig")
-    sig = hashlib.md5(payload + app_secret).hexdigest()
-    expires = int(args["expires"])
-    if sig == args.get("sig") and (expires == 0 or time.time() < expires):
-        return args
-    else:
-        return None
-
-
-def parse_signed_request(signed_request, app_secret):
-    """Return dictionary with signed request data."""
-    try:
-        l = signed_request.split('.', 2)
-        encoded_sig = str(l[0])
-        payload = str(l[1])
-    except IndexError:
-        raise ValueError("'signed_request' malformed")
-
-    sig = base64.urlsafe_b64decode(encoded_sig + "=" * ((4 - len(encoded_sig) % 4) % 4))
-    data = base64.urlsafe_b64decode(payload + "=" * ((4 - len(payload) % 4) % 4))
-
-    data = _decode_json(data)
-
-    if data.get('algorithm').upper() != 'HMAC-SHA256':
-        raise Error("'signed_request' is using an unknown algorithm")
-    else:
-        expected_sig = hmac.new(app_secret, msg=payload, digestmod=hashlib.sha256).digest()
-
-    if sig != expected_sig:
-        raise Error("'signed_request' signature mismatch")
-    else:
-        return data
-
-
-def build_signed_request(user_id, oauth_token, app_secret):
-    data = dict(
-                algorithm='HMAC-SHA256',
-                issued_at=int(time.time()),
-                user=dict(locale='en_US', country='us')
-                )
-
-    if oauth_token is not None:
-        data['oauth_token'] = oauth_token
-        data['user_id'] = user_id
-        
-    payload = base64.urlsafe_b64encode(_encode_json(data))
-    payload = payload.rstrip("=")
-
-    sig = hmac.new(app_secret, msg=payload, digestmod=hashlib.sha256).digest()
-    encoded_sig = base64.urlsafe_b64encode(sig)
-
-    return ".".join((encoded_sig.rstrip("="), payload.rstrip("=")))
