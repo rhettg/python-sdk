@@ -28,28 +28,49 @@ usage of this module might look like this:
     user = facebook.get_user_from_cookie(self.request.cookies, key, secret)
     if user:
         graph = facebook.GraphAPI(user["access_token"])
-        profile = graph.get_object("me")
-        friends = graph.get_connections("me", "friends")
+        profile = graph.fetch("me")
+        friends = graph.fetch_connections("me", "friends")
 
 """
 
 import cgi
+import base64
 import hashlib
+import hmac
+import httplib
+import logging
 import time
 import urllib
+
 
 # Find a JSON parser
 try:
     import json
-    _parse_json = lambda s: json.loads(s)
+    _decode_json = json.loads
+    _encode_json = json.dumps
 except ImportError:
     try:
         import simplejson
-        _parse_json = lambda s: simplejson.loads(s)
     except ImportError:
         # For Google AppEngine
         from django.utils import simplejson
-        _parse_json = lambda s: simplejson.loads(s)
+    _decode_json = simplejson.loads
+    _encode_json = simplejson.dumps
+
+class Error(Exception): pass
+
+class CommunicationError(Error): pass
+
+class GraphAPIError(Error):
+    def __init__(self, type, message):
+        Exception.__init__(self, message)
+        self.type = type
+
+
+GRAPH_API_HOST = "graph.facebook.com"
+USER_AGENT = "Facebook Python API Client 1.0"
+
+log = logging.getLogger(__name__)
 
 
 class GraphAPI(object):
@@ -66,8 +87,8 @@ class GraphAPI(object):
     of the user's friends:
 
        graph = facebook.GraphAPI(access_token)
-       user = graph.get_object("me")
-       friends = graph.get_connections(user["id"], "friends")
+       user = graph.fetch("me")
+       friends = graph.fetch_connections(user["id"], "friends")
 
     You can see a list of all of the objects and connections supported
     by the API at http://developers.facebook.com/docs/reference/api/.
@@ -80,39 +101,67 @@ class GraphAPI(object):
     get_user_from_cookie() method below to get the OAuth access token
     for the active user from the cookie saved by the SDK.
     """
-    def __init__(self, access_token=None):
+    def __init__(self, access_token):
         self.access_token = access_token
 
-    def get_object(self, id, **args):
+    def fetch(self, id, metadata=None, fields=None):
         """Fetchs the given object from the graph."""
-        return self.request(id, args)
+        args = dict()
+        if metadata is not None:
+            args = {
+                'metadata': metadata
+            }
+        if fields is not None:
+            args['fields'] = ",".join(fields)
 
-    def get_objects(self, ids, **args):
-        """Fetchs all of the given object from the graph.
+        # Unset the args if we didn't need it
+        args = args or None
+        
+        return self.request("GET", "/" + str(id), args=args)
 
-        We return a map from ID to object. If any of the IDs are invalid,
-        we raise an exception.
+    def multi_fetch(self, ids):
+        """Fetch multiple objects by id"""
+        return self.request("GET", "/", args={'ids': ",".join(ids)})
+
+    def fetch_url(self, url):
+        """Fetch an object by it's URL
+        
+        This is useful for when you don't have the actual id, but just a url.
         """
-        args["ids"] = ",".join(ids)
-        return self.request("", args)
+        return self.multi_fetch([url])
 
-    def get_connections(self, id, connection_name, **args):
-        """Fetchs the connections for given object."""
-        return self.request(id + "/" + connection_name, args)
+    def fetch_connections(self, id, connection_name, limit=None, offset=None, until=None, since=None):
+        path = "/".join(("", str(id), connection_name))
+        args = dict()
 
-    def put_object(self, parent_object, connection_name, **data):
+        if limit:
+            args['limit'] = limit
+        if offset:
+            args['offset'] = offset
+        if until:
+            args['until'] = time.mktime(until.timetuple())
+        if since:
+            args['since'] = time.mktime(since.timetuple())
+            
+
+        # Unset the args if we didn't need it
+        args = args or None
+        
+        return self.request("GET", path, args=args)
+        
+    def put(self, parent_id, connection_name, **data):
         """Writes the given object to the graph, connected to the given parent.
 
         For example,
 
-            graph.put_object("me", "feed", message="Hello, world")
+            graph.put("me", "feed", message="Hello, world")
 
         writes "Hello, world" to the active user's wall. Likewise, this
         will comment on a the first post of the active user's feed:
 
-            feed = graph.get_connections("me", "feed")
+            feed = graph.fetch_connections("me", "feed")
             post = feed["data"][0]
-            graph.put_object(post["id"], "comments", message="First!")
+            graph.put(post["id"], "comments", message="First!")
 
         See http://developers.facebook.com/docs/api#publishing for all of
         the supported writeable objects.
@@ -122,9 +171,36 @@ class GraphAPI(object):
         http://developers.facebook.com/docs/authentication/ for details about
         extended permissions.
         """
-        assert self.access_token, "Write operations require an access token"
-        return self.request(parent_object + "/" + connection_name, post_args=data)
+        
+        path = "/".join(("", str(parent_id), connection_name))
+        
+        return self.request("POST", path, data=data)
+    
+    def search(self, object_type, query, **kwargs):
+        """Search over public objects in the social graph
+        
+        Example object types would be: 'user, page, event, group, place, checkin'
 
+        Some objects types have additional query terms that can be passed as kwargs to this function
+        """
+        args = {
+            'q': query,
+            'type': object_type,
+        }
+        args.update(kwargs)
+        return self.request("GET", "/search", args=args)
+        
+    def delete(self, id):
+        return self.request("DELETE", "/" + id)
+
+    def request(self, method, path, args=None, data=None):
+        """Fetches the given path in the Graph API under the context of the curent access token.
+
+        """
+        return graph_api_request(method, path, args=args, data=data, access_token=self.access_token)
+
+
+    # Common GraphAPI operations
     def put_wall_post(self, message, attachment={}, profile_id="me"):
         """Writes a wall post to the given profile's wall.
 
@@ -141,49 +217,153 @@ class GraphAPI(object):
              "picture": "http://www.example.com/thumbnail.jpg"}
 
         """
-        return self.put_object(profile_id, "feed", message=message, **attachment)
+        return self.put(profile_id, "feed", message=message, **attachment)
 
     def put_comment(self, object_id, message):
         """Writes the given comment on the given post."""
-        return self.put_object(object_id, "comments", message=message)
+        return self.put(object_id, "comments", message=message)
 
     def put_like(self, object_id):
         """Likes the given post."""
-        return self.put_object(object_id, "likes")
-
-    def delete_object(self, id):
-        """Deletes the object with the given ID from the graph."""
-        self.request(id, post_args={"method": "delete"})
-
-    def request(self, path, args=None, post_args=None):
-        """Fetches the given path in the Graph API.
-
-        We translate args to a valid query string. If post_args is given,
-        we send a POST request to the given path with the given arguments.
-        """
-        if not args: args = {}
-        if self.access_token:
-            if post_args is not None:
-                post_args["access_token"] = self.access_token
-            else:
-                args["access_token"] = self.access_token
-        post_data = None if post_args is None else urllib.urlencode(post_args)
-        file = urllib.urlopen("https://graph.facebook.com/" + path + "?" +
-                              urllib.urlencode(args), post_data)
-        try:
-            response = _parse_json(file.read())
-        finally:
-            file.close()
-        if response.get("error"):
-            raise GraphAPIError(response["error"]["type"],
-                                response["error"]["message"])
-        return response
+        return self.put(object_id, "likes")
 
 
-class GraphAPIError(Exception):
-    def __init__(self, type, message):
-        Exception.__init__(self, message)
-        self.type = type
+class TestUser(object):
+    """Class for creating an manipulating test users"""
+    _graph_api_cls = GraphAPI
+    
+    def __init__(self, user_data):
+        self.user_data = user_data
+        self._graph_api = None
+
+    @property
+    def id(self):
+        return self.user_data['id']
+
+    @property
+    def graph_api(self):
+        if not self._graph_api:
+            if not self.user_data['access_token']:
+                raise Error("User does not have current application installed, no access_token")
+
+            self._graph_api = self._graph_api_cls(self.user_data['access_token'])
+        return self._graph_api
+
+    @property
+    def profile(self):
+        return self.graph_api.fetch("me")
+
+    def build_signed_request(self, user_id, app_secret):
+        return build_signed_request(user_id, self.user_data['access_token'], app_secret)
+
+    def friend_user(self, other_user):
+        """Associate the two TestUser's as friends"""
+        other_user.graph_api.put(other_user.id, "friends/%s" % self.id)
+        self.graph_api.put(self.id, "friends/%s" % other_user.id)
+
+    def __repr__(self):
+        return "<TestUser: %r>" % self.user_data
+
+    @classmethod
+    def create(cls, graph_api, app_id, installed=False, permissions=None):
+        args = {}
+
+        if permissions:
+            args['permissions'] = ",".join(permissions)
+
+        args['installed'] = installed
+
+        user = TestUser(graph_api.put(app_id, "accounts/test-users", **args))
+        user._graph_api_cls = graph_api.__class__
+        return user
+
+    @classmethod
+    def list_all(cls, graph_api, app_id):
+        response = graph_api.fetch_connections(app_id, "accounts/test-users")
+        return [TestUser(user_data) for user_data in response['data']]
+
+    @classmethod
+    def delete_all(cls, graph_api, app_id):
+        """Remote all test users"""
+        for user in cls.list_all(graph_api, app_id):
+            graph_api.delete(user.id)
+
+
+def get_oauth_access_token(app_id, app_secret):
+    """Authenticates as an application and retrieves the OAuth access token"""
+    headers = {
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/plain',
+    }
+
+    data = {"grant_type": "client_credentials", "client_id": app_id, "client_secret": app_secret}
+    
+    conn = httplib.HTTPSConnection(GRAPH_API_HOST)
+    
+    conn.request("POST", "/oauth/access_token", urllib.urlencode(data), headers=headers)
+    response = conn.getresponse()
+
+    if response.status != httplib.OK:
+        raise CommunicationError((response.status, response.reason))
+
+    access_token = response.read()
+    if not access_token:
+        raise AuthenticationError("Unknown response")
+
+    return access_token.split("=")[1]
+
+def graph_api_request(method, path, args=None, data=None, access_token=None, headers=None):
+    out_headers = {
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/javascript',
+    }
+
+    args = args or dict()
+
+    if headers:
+        out_headers.update(headers)
+
+    if access_token is not None:
+        if data is not None:
+            data["access_token"] = access_token
+        else:
+            args["access_token"] = access_token
+
+    out_data = None
+    if data:
+        out_data = urllib.urlencode(data)
+        out_headers.setdefault('Content-type', "application/x-www-form-urlencoded")
+
+    conn = httplib.HTTPSConnection(GRAPH_API_HOST)
+
+    out_path = "?".join((path, urllib.urlencode(args)))
+
+    log.debug("%s %s" % (method, out_path))
+
+    conn.request(method, out_path, out_data, out_headers)
+    response = conn.getresponse()
+
+    log.debug("Response: %r", (response.status, response.reason))
+
+    if response.getheader('Content-type').startswith("text/javascript"):
+        response_data = _decode_json(response.read())
+    else:
+        raise Exception(response.getheader('Content-type'))
+        response_data = response.read()
+
+    log.debug("Response Data: %r", response_data)
+
+    if isinstance(response_data, dict) and response_data.get("error"):
+        raise GraphAPIError(response_data["error"]["type"],
+                            response_data["error"]["message"])
+
+    if response.status != httplib.OK:
+        raise CommunicationError((response.status, response.reason))
+
+    if not response:
+        raise GraphAPIError("No response")
+
+    return response_data
 
 
 def get_user_from_cookie(cookies, app_id, app_secret):
@@ -212,3 +392,48 @@ def get_user_from_cookie(cookies, app_id, app_secret):
         return args
     else:
         return None
+
+
+def parse_signed_request(signed_request, app_secret):
+    """Return dictionary with signed request data."""
+    try:
+        l = signed_request.split('.', 2)
+        encoded_sig = str(l[0])
+        payload = str(l[1])
+    except IndexError:
+        raise ValueError("'signed_request' malformed")
+
+    sig = base64.urlsafe_b64decode(encoded_sig + "=" * ((4 - len(encoded_sig) % 4) % 4))
+    data = base64.urlsafe_b64decode(payload + "=" * ((4 - len(payload) % 4) % 4))
+
+    data = _decode_json(data)
+
+    if data.get('algorithm').upper() != 'HMAC-SHA256':
+        raise Error("'signed_request' is using an unknown algorithm")
+    else:
+        expected_sig = hmac.new(app_secret, msg=payload, digestmod=hashlib.sha256).digest()
+
+    if sig != expected_sig:
+        raise Error("'signed_request' signature mismatch")
+    else:
+        return data
+
+
+def build_signed_request(user_id, oauth_token, app_secret):
+    data = dict(
+                algorithm='HMAC-SHA256',
+                issued_at=int(time.time()),
+                user=dict(locale='en_US', country='us')
+                )
+
+    if oauth_token is not None:
+        data['oauth_token'] = oauth_token
+        data['user_id'] = user_id
+        
+    payload = base64.urlsafe_b64encode(_encode_json(data))
+    payload = payload.rstrip("=")
+
+    sig = hmac.new(app_secret, msg=payload, digestmod=hashlib.sha256).digest()
+    encoded_sig = base64.urlsafe_b64encode(sig)
+
+    return ".".join((encoded_sig.rstrip("="), payload.rstrip("=")))
