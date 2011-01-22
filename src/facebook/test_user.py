@@ -1,6 +1,8 @@
+import facebook
+
 class TestUser(object):
     """Class for creating an manipulating test users"""
-    _graph_api_cls = GraphAPI
+    _graph_api_cls = facebook.GraphAPI
     
     def __init__(self, user_data):
         self.user_data = user_data
@@ -24,7 +26,7 @@ class TestUser(object):
         return self.graph_api.fetch("me")
 
     def build_signed_request(self, user_id, app_secret):
-        return build_signed_request(user_id, self.user_data['access_token'], app_secret)
+        return facebook.build_signed_request(user_id, self.user_data['access_token'], app_secret)
 
     def friend_user(self, other_user):
         """Associate the two TestUser's as friends"""

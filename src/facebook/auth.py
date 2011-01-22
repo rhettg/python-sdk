@@ -1,19 +1,47 @@
+#!/usr/bin/env python
+#
+# Copyright 2010 Facebook
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
+"""Utilities for dealing with oauth and facebook authentication
+
+"""
+import base64
+import cgi
+import hashlib
+import hmac
+import httplib
+
+import facebook
+
+
 def get_oauth_access_token(app_id, app_secret):
     """Authenticates as an application and retrieves the OAuth access token"""
     headers = {
-        'User-Agent': USER_AGENT,
+        'User-Agent': facebook.USER_AGENT,
         'Accept': 'text/plain',
     }
 
     data = {"grant_type": "client_credentials", "client_id": app_id, "client_secret": app_secret}
     
-    conn = httplib.HTTPSConnection(GRAPH_API_HOST)
+    conn = httplib.HTTPSConnection(facebook.GRAPH_API_HOST)
     
     conn.request("POST", "/oauth/access_token", urllib.urlencode(data), headers=headers)
     response = conn.getresponse()
 
     if response.status != httplib.OK:
-        raise CommunicationError((response.status, response.reason))
+        raise facebook.CommunicationError((response.status, response.reason))
 
     access_token = response.read()
     if not access_token:
@@ -69,12 +97,16 @@ def parse_signed_request(signed_request, app_secret):
         expected_sig = hmac.new(app_secret, msg=payload, digestmod=hashlib.sha256).digest()
 
     if sig != expected_sig:
-        raise Error("'signed_request' signature mismatch")
+        raise facebook.Error("'signed_request' signature mismatch")
     else:
         return data
 
 
 def build_signed_request(user_id, oauth_token, app_secret):
+    """Builds a signed request just like facebook would do.
+    
+    This is only useful for testing and verification of parse_signed_request.
+    """
     data = dict(
                 algorithm='HMAC-SHA256',
                 issued_at=int(time.time()),

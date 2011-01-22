@@ -14,61 +14,23 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Python client library for the Facebook Platform.
+"""Core graph API
 
-This client library is designed to support the Graph API and the official
-Facebook JavaScript SDK, which is the canonical way to implement
-Facebook authentication. Read more about the Graph API at
-http://developers.facebook.com/docs/api. You can download the Facebook
-JavaScript SDK at http://github.com/facebook/connect-js/.
-
-If your application is using Google AppEngine's webapp framework, your
-usage of this module might look like this:
-
-    user = facebook.get_user_from_cookie(self.request.cookies, key, secret)
-    if user:
-        graph = facebook.GraphAPI(user["access_token"])
-        profile = graph.fetch("me")
-        friends = graph.fetch_connections("me", "friends")
-
+Instances of GraphAPI provide a view into the facebook graph with the provided access token.
 """
 
-import cgi
-import base64
-import hashlib
-import hmac
 import httplib
 import logging
 import time
 import urllib
 
+import facebook
 
-# Find a JSON parser
-try:
-    import json
-    _decode_json = json.loads
-    _encode_json = json.dumps
-except ImportError:
-    try:
-        import simplejson
-    except ImportError:
-        # For Google AppEngine
-        from django.utils import simplejson
-    _decode_json = simplejson.loads
-    _encode_json = simplejson.dumps
-
-class Error(Exception): pass
-
-class CommunicationError(Error): pass
-
-class GraphAPIError(Error):
+class GraphAPIError(facebook.Error):
     def __init__(self, type, message):
         Exception.__init__(self, message)
         self.type = type
 
-
-GRAPH_API_HOST = "graph.facebook.com"
-USER_AGENT = "Facebook Python API Client 1.0"
 
 log = logging.getLogger(__name__)
 
@@ -96,12 +58,12 @@ class GraphAPI(object):
     You can obtain an access token via OAuth or by using the Facebook
     JavaScript SDK. See http://developers.facebook.com/docs/authentication/
     for details.
-
-    If you are using the JavaScript SDK, you can use the
-    get_user_from_cookie() method below to get the OAuth access token
-    for the active user from the cookie saved by the SDK.
     """
-    def __init__(self, access_token):
+    def __init__(self, access_token=None):
+        """Create an instance of GraphAPI bound to the specified access token
+        
+        If an access token isn't provided, the graph api will only be able to access public information.
+        """
         self.access_token = access_token
 
     def fetch(self, id, metadata=None, fields=None):
@@ -131,6 +93,21 @@ class GraphAPI(object):
         return self.multi_fetch([url])
 
     def fetch_connections(self, id, connection_name, limit=None, offset=None, until=None, since=None):
+        """Fetch a connection for the specifeid object.
+        
+        There are various optional argument that can be used to prune down the results.
+        
+        Args:
+          id: Identifier for the object to fetch a connection from
+          connection_name: Name of the connection: Ex: 'friends'
+          limit: (optional) maximum connected objects to retrieve
+          offset: (optional) return objects great than the offset specified (useful for paging)
+          until: (optional) datetime instance that represents how old an object must be
+          since: (optional) datetime instance that reprsents how new an object must be
+        
+        Returns:
+          Dictionary result set. Typically with a key 'data' that contains a list of connected objects.
+        """
         path = "/".join(("", str(id), connection_name))
         args = dict()
 
@@ -229,7 +206,7 @@ class GraphAPI(object):
 
 def graph_api_request(method, path, args=None, data=None, access_token=None, headers=None):
     out_headers = {
-        'User-Agent': USER_AGENT,
+        'User-Agent': facebook.USER_AGENT,
         'Accept': 'text/javascript',
     }
 
@@ -249,7 +226,7 @@ def graph_api_request(method, path, args=None, data=None, access_token=None, hea
         out_data = urllib.urlencode(data)
         out_headers.setdefault('Content-type', "application/x-www-form-urlencoded")
 
-    conn = httplib.HTTPSConnection(GRAPH_API_HOST)
+    conn = httplib.HTTPSConnection(facebook.GRAPH_API_HOST)
 
     out_path = "?".join((path, urllib.urlencode(args)))
 
@@ -273,7 +250,7 @@ def graph_api_request(method, path, args=None, data=None, access_token=None, hea
                             response_data["error"]["message"])
 
     if response.status != httplib.OK:
-        raise CommunicationError((response.status, response.reason))
+        raise facebook.CommunicationError((response.status, response.reason))
 
     if not response:
         raise GraphAPIError("No response")
