@@ -10,8 +10,8 @@ about the Graph API at [http://developers.facebook.com/docs/api](http://develope
 Basic usage:
 
     graph = facebook.GraphAPI(oauth_access_token)
-    profile = graph.get_object("me")
-    friends = graph.get_connections("me", "friends")
+    profile = graph.fetch("me")
+    friends = graph.fetch_connections("me", "friends")
     graph.put_object("me", "feed", message="I am writing on my wall!")
 
 If you are using the module within a web application with the
@@ -23,10 +23,16 @@ profile of the logged in user with:
     user = facebook.get_user_from_cookie(self.request.cookies, key, secret)
     if user:
         graph = facebook.GraphAPI(user["oauth_access_token"])
-        profile = graph.get_object("me")
-        friends = graph.get_connections("me", "friends")
+        profile = graph.fetch("me")
+        friends = graph.fetch_connections("me", "friends")
 
 You can see a full AppEngine example application in examples/appengine.
+
+Creating Test Users
+-------------------
+
+Mock Facebook
+---------------
 
 Reporting Issues
 --------
